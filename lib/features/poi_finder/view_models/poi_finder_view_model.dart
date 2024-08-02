@@ -23,7 +23,7 @@ class POIFinderViewModel extends ViewModel {
 
   final controller = SearchController();
 
-  LatLng? get _currentLocation => getService<IndoorPositioningService>().wgs84position;
+  LatLng? get _currentLocation => getService<IndoorPositioningService>().fusedPosition;
 
   Completer<POICollection>? _nearbyPois;
 

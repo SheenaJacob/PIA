@@ -30,13 +30,13 @@ class TraceletManagerView extends View<TraceletManagerViewModel> {
             children: [
               TextButton(
                 onPressed: !viewModel.isConnected
-                  ? viewModel.connectToTracelet
+                  ? viewModel.startPositioning
                   : null,
                 child: Text(localizations.indoorPositioningDialogConnectButton),
               ),
               TextButton(
                 onPressed: viewModel.isConnected
-                  ? viewModel.disconnectFromTracelet
+                  ? viewModel.stopPositioning
                   : null,
                 child: Text(localizations.indoorPositioningDialogDisconnectButton),
               ),

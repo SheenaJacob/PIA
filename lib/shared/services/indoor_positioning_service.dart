@@ -8,13 +8,14 @@ import 'package:flutter/material.dart' hide Action;
 import 'package:flutter_mvvm_architecture/base.dart';
 import 'package:get_it/get_it.dart';
 import 'package:logging/logging.dart';
-
+import 'package:geolocator/geolocator.dart';
 import 'package:mobx/mobx.dart';
 
-/// Provides functionality to connect to a uwb tracelet, and receive position values
-///
-/// To start positioning use the function [connectTracelet].
-/// To stop positioning use the function [disconnectTracelet].
+import '../utils/position_fuser.dart';
+
+/// Combines positions received when using a UWB Tracelet and also real time positions from the geolocator package, and fuses them using the kalman filter
+/// To start positioning use the function [startPositioning].
+/// To stop positioning use the function [stopTraceletPositioning].
 
 class IndoorPositioningService extends Service implements Disposable {
   IndoorPositioningService({
@@ -46,29 +47,115 @@ class IndoorPositioningService extends Service implements Disposable {
   /// Return true if a tracelet is connected, and false otherwise
   bool get isConnected => _isConnected.value;
 
-  // ------------------  Current Wgs84 Position -------------------//
+  // ------------------  Current LatLng Positions -------------------//
 
-  final Observable<LatLng?> _wgs84Position = Observable(null);
+  final Observable<LatLng?> _traceletPosition = Observable(null);
 
   /// Returns the current wgs84 position from a tracelet. If no position found returns null
-  LatLng? get wgs84position => _wgs84Position.value;
+  LatLng? get traceletPosition => _traceletPosition.value;
 
-  // ------------------  EasyLocate SDK -------------------//
+  final Observable<LatLng?> _gnssPosition = Observable(null);
+
+  /// Returns the current GNSS position from the geolocation package. If no position returns null
+  LatLng? get gnssPosition => _gnssPosition.value;
+
+  final Observable<LatLng?> _fusedPosition = Observable(null);
+
+  /// Returns the current fused Position . If no position returns null
+  LatLng? get fusedPosition => _fusedPosition.value;
+
+  // ------------------  Start and Stop Positioning -------------------//
+
+  /// Starts receiving tracelet positions, geolocations , and fused positions
+  void startPositioning() {
+    startTraceletPositioning();
+    starGeolocation();
+    _startFusion();
+  }
+
+  /// Stops tracelet positioning, fusedPositioning, and geolocations
+  void stopPositioning() {
+    stopTraceletPositioning();
+    starGeolocation();
+    _stopFusion();
+  }
+
+  // ------------------  System Fusion -------------------//
+
+  final _fusionLog = Logger('Fusion Positioning');
+
+  Timer _fusionTime = Timer(Duration.zero, () {});
+
+  late final positionFuser = PositionFuser(
+      referenceLatitude: referenceLatitude,
+      referenceLongitude: referenceLongitude,
+      referenceAzimuth: referenceAzimuth);
+
+  /// Fuses tracelet positions and gnss positions.
+  void _startFusion() {
+    _fusionLog.info('Starting Position Fusion');
+    _fusionTime = Timer(const Duration(seconds: 1), () {
+      final fusedPosition = positionFuser.fusedPosition;
+      runInAction(() {
+        _fusedPosition.value = fusedPosition;
+        _fusionLog.fine('Position received $fusedPosition');
+      });
+    });
+  }
+
+  /// Stops position fusion
+  void _stopFusion() {
+    _fusionTime.cancel();
+  }
+
+  // ------------------  GeoLocation -------------------//
+
+  final _geolocatorLog = Logger('Geolocator Positioning');
+
+  StreamSubscription<Position>? _positionStream;
+
+  final LocationSettings locationSettings = const LocationSettings(
+    accuracy: LocationAccuracy.high,
+    distanceFilter: 100,
+  );
+
+  /// Starts listening to real time positions from platform specific location services
+  void starGeolocation() {
+    _geolocatorLog.info('Starting Geolocation');
+    try {
+      _positionStream =
+          Geolocator.getPositionStream(locationSettings: locationSettings)
+              .listen((Position? position) {
+        if (position != null) {
+          runInAction(() => _gnssPosition.value =
+              LatLng(position.latitude, position.longitude));
+          _geolocatorLog.finest('Position Received : $gnssPosition');
+          positionFuser.updateGnssPosition(gnssPosition, position.accuracy);
+        }
+      });
+    } on Exception catch (error) {
+      _geolocatorLog.shout(error);
+    }
+  }
+
+  /// Stops listening to platform specific location services
+  void stopGeolocation() {
+    _geolocatorLog.info('Stopping Geolocation');
+    _positionStream?.cancel();
+  }
+
+  // ------------------  Tracelet Positioning -------------------//
+
+  final _traceletLog = Logger('Tracelet Positioning API');
 
   final _easyLocateSdk = EasyLocateSdk();
 
   TraceletApi? _positioningApi;
 
-  // ------------------  Bluetooth device -------------------//
-
   final Observable<BleDevice?> _bluetoothTracelet = Observable(null);
 
   /// Retrieves the currently connected bluetooth tracelet. Null when no device is found
   BleDevice? get bluetoothTracelet => _bluetoothTracelet.value;
-
-  final log = Logger('Tracelet API');
-
-  // ------------------  Tracelet Connecting & Disconnecting-------------------//
 
   /// Connects to the Tracelet on Channel 5 with the closest RSSI value, and starts monitoring the positions.
   ///
@@ -79,70 +166,73 @@ class IndoorPositioningService extends Service implements Disposable {
   /// 3. Sets the channel to 5, the positioning interval to 250ms and motion check interval to 0ms. (Default values used)
   /// 4. Sets the reference wgs84 position. This is the wgs84 position of the origin
   /// 5. Starts positioning
-  void connectTracelet() async {
+  void startTraceletPositioning() async {
     try {
       // Registers the scanListener to look for bluetooth tracelets
       final scanListener = BluetoothScanListener();
       // Starts scanning and looks for tracelets for 5 seconds
-      log.info('Start Scanning for Tracelets');
+      _traceletLog.info('Start Scanning for Tracelets');
       await _easyLocateSdk.startTraceletScan(
         scanListener,
         scanTimeout: 5,
       );
       // Gets the closest bluetooth tracelet available
       final bluetoothTracelet = scanListener.bleDevice;
-      log.info('Tracelets Found ${bluetoothTracelet?.name}');
+      _traceletLog.info('Tracelets Found ${bluetoothTracelet?.name}');
       // Stops bluetooth tracelet scanning
       await _easyLocateSdk.stopBleScan();
-      log.info('Stop Scanning');
+      _traceletLog.info('Stop Scanning');
 
       // Continue only if a ble Tracelet is found
       if (bluetoothTracelet != null) {
         // Connect to the bluetooth tracelet
-        log.info('Connecting to Tracelet');
+        _traceletLog.info('Connecting to Tracelet');
         _positioningApi = await _easyLocateSdk.connectBleTracelet(
           bluetoothTracelet,
           listener: ConnectionListener(
             onConnected: () async {
               runInAction(() => _isConnected.value = true);
-              log.info(
+              _traceletLog.info(
                   'Tracelet Connected. To verify look for a blue flashing light on the device');
               // A blue LED blinks on the connected device. This can be used to verify if you're connected to the right device
               await _positioningApi!.showMe();
 
-              log.info('Setting channel to Channel 5');
+              _traceletLog.info('Setting channel to Channel 5');
               // Set the channel to 5 (6.5 GHz). For dw1k tracelets, channel setting is not required as the tracelets operate only on 6.5Ghz
               final channelStatus = await _positioningApi!
                   .setRadioSettings(Channel.FIVE)
                   .timeout(const Duration(seconds: 3));
               channelStatus
-                  ? log.info('Channel Set Successfully')
-                  : log.shout('Channel Not Set');
+                  ? _traceletLog.info('Channel Set Successfully')
+                  : _traceletLog.shout('Channel Not Set');
               // Sets the reference wgs84 position. This should be the wgs84 position of the origin
               // By default the tracelet does not know its position in LatLng coordinates,
               // but instead it know the distance in meters from the origin, and it uses the
               // wgs84 coordinates of the origin to find its own position in the real world
-              log.info('Setting reference wgs84 position');
+              _traceletLog.info('Setting reference wgs84 position');
               await _positioningApi!.setWgs84Reference(
                   referenceLatitude, referenceLongitude, referenceAzimuth);
-
               // Sets the positioning interval to 250ms. This means that we can get 4 position values every second
-              log.info('Setting up positioning interval');
+              _traceletLog.info('Setting up positioning interval');
               await _positioningApi!.setPositioningInterval(1);
 
               // Sets the motion check interval to 0. This disables checking if there is motion on the tracelet
-              log.info('Setting up motion check interval');
+              _traceletLog.info('Setting up motion check interval');
               await _positioningApi!.setMotionCheckInterval(0);
 
               // Start positioning. Uses the position listener to get wgs84 values
-              log.info('Start Positioning');
+              _traceletLog.info('Start Positioning');
               await _positioningApi!.startPositioning(
                 PositionListener(
                   onWgs84PositionUpdated: (position) {
                     runInAction(
-                      () => _wgs84Position.value =
+                      () => _traceletPosition.value =
                           LatLng(position.lat, position.lon),
                     );
+                    _traceletLog
+                        .finest('Position Received : $traceletPosition');
+                    positionFuser.updateUwbPosition(
+                        traceletPosition, position.acc);
                   },
                 ),
               );
@@ -151,10 +241,10 @@ class IndoorPositioningService extends Service implements Disposable {
               runInAction(() {
                 _isConnected.value = false;
                 _bluetoothTracelet.value = null;
-                _wgs84Position.value = null;
+                _traceletPosition.value = null;
               });
               // Takes 1 second after disconnectTracelet() runs to execute
-              log.info('Tracelet Disconnected');
+              _traceletLog.info('Tracelet Disconnected');
             },
           ),
         );
@@ -163,16 +253,16 @@ class IndoorPositioningService extends Service implements Disposable {
       runInAction(() {
         _bluetoothTracelet.value = null;
         _isConnected.value = false;
-        _wgs84Position.value = null;
+        _traceletPosition.value = null;
       });
-      log.info(error.toString());
+      _traceletLog.info(error.toString());
     }
   }
 
   /// Disconnects from a Tracelet
-  void disconnectTracelet() async {
+  void stopTraceletPositioning() async {
     if (_positioningApi != null) {
-      log.info('Disconnecting Tracelet');
+      _traceletLog.info('Disconnecting Tracelet');
       await _positioningApi!.stopPositioning();
       // The tracelet takes 1s to disconnect
       _positioningApi!.disconnect();
@@ -183,10 +273,10 @@ class IndoorPositioningService extends Service implements Disposable {
   @override
   FutureOr onDispose() {
     if (_positioningApi != null) {
-      log.info(' Disconnecting Tracelet');
+      _traceletLog.info(' Disconnecting Tracelet');
       _positioningApi!.disconnect();
     }
-    log.info('Service disposed successfully');
+    _traceletLog.info('Service disposed successfully');
   }
 }
 
