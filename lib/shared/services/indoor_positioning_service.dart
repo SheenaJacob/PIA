@@ -53,9 +53,7 @@ class IndoorPositioningService extends Service implements Disposable {
   /// Returns the current wgs84 position from a tracelet. If no position found returns null
   LatLng? get wgs84position => _wgs84Position.value;
 
-  // ------------------  EasyLocate SDK -------------------//
-
-  final _easyLocateSdk = EasyLocateSdk();
+  // ------------------  Positioning Api -------------------//
 
   TraceletApi? _positioningApi;
 
@@ -83,12 +81,12 @@ class IndoorPositioningService extends Service implements Disposable {
     try {
       // Registers the scanListener to look for bluetooth tracelets
       final scanListener = BluetoothScanListener();
-      EasyLocateSdk easyLocateSdk = EasyLocateSdk();
+      final EasyLocateSdk easyLocateSdk = EasyLocateSdk();
       // Starts scanning and looks for tracelets for 5 seconds
       log.info('Start Scanning for Tracelets');
       await easyLocateSdk.startTraceletScan(
         scanListener,
-        scanTimeout: 5,
+        scanTimeout: const Duration(seconds: 5),
       );
       // Gets the closest bluetooth tracelet available
       final bluetoothTracelet = scanListener.bleDevice;
@@ -96,28 +94,29 @@ class IndoorPositioningService extends Service implements Disposable {
       // Stops bluetooth tracelet scanning
       await easyLocateSdk.stopBleScan();
       log.info('Stop Scanning');
-
       // Continue only if a ble Tracelet is found
       if (bluetoothTracelet != null) {
         // Connect to the bluetooth tracelet
         log.info('Connecting to Tracelet');
-        _positioningApi = await _easyLocateSdk.connectBleTracelet(
+        _positioningApi = await easyLocateSdk.connectBleTracelet(
           bluetoothTracelet,
-          ConnectionListener(
+          listener: ConnectionListener(
             onConnected: () async {
               runInAction(() => _isConnected.value = true);
-              log.info('Tracelet Connected. To verify look for a blue flashing light on the device');
+              log.info(
+                  'Tracelet Connected. To verify look for a blue flashing light on the device');
               // A blue LED blinks on the connected device. This can be used to verify if you're connected to the right device
               await _positioningApi!.showMe();
 
               log.info('Setting channel to Channel 5');
               // Set the channel to 5 (6.5 GHz). For dw1k tracelets, channel setting is not required as the tracelets operate only on 6.5Ghz
+
               final channelStatus = await _positioningApi!
-                  .setChannel(Channel.FIVE)
+                  .setRadioSettings(Channel.FIVE)
                   .timeout(const Duration(seconds: 3));
               channelStatus
-                ? log.info('Channel Set Successfully')
-                : log.shout('Channel Not Set');
+                  ? log.info('Channel Set Successfully')
+                  : log.shout('Channel Not Set');
               // Sets the reference wgs84 position. This should be the wgs84 position of the origin
               // By default the tracelet does not know its position in LatLng coordinates,
               // but instead it know the distance in meters from the origin, and it uses the
